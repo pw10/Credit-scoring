@@ -1,0 +1,627 @@
+---
+title: "Obliczanie VaR ró¿nymi metodami"
+author: "PW"
+date: "5 kwietnia 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+## 1. Wprowadzenie 
+
+Celem niniejszego projektu bêdzie wykorzystanie 3 metod pozwalaj¹cych na wyznaczenie wartoœci nara¿onej na ryzyko (VAR) i próba odpowiedzi na pytanie, który z zaprezentowanych sposobów wyznaczania VAR (oraz ES, czyli warunkowej wartoœci oczekiwanej) jest najlepszy. </br>
+
+W ramach badania wykorzystam 3 metody :
+
+* symulacji historycznej,
+
+* bootstrap,
+
+* symulacji historycznej z wagami.
+
+**W ka¿dej metodzie wyznaczania VaR bêdê wyznacza³ go z 99% pewnoœci¹ na 500dniowym oknie estymacji.**
+
+
+## 2. Opis danych
+
+Do przeprowadzenia badania wykorzystam kursy walutowe z lat 2012 - 2018 dla 3 wybranych walut :
+
+* **GBP**, czyli funta, waluty Wielkiej Brytanii,
+
+* **DKK** czyli korony duñskiej obowi¹zuj¹cej na terenie Danii,
+
+* oraz **THB**, czyli tzw. baht tajski lub inaczej bat, waluta obowi¹zuj¹ca w Tajlandii.
+
+Kursy tych walut przedstawia³y siê nastêpuj¹co na przestrzeni rozwa¿anego okresu:
+
+```{r, echo = FALSE}
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+library(distr)
+library(GAS)
+library(grid)
+library(gridExtra)
+
+#wczytanie danych
+data <- read.csv("C:/Users/Pawe³/Desktop/kursy_walut.csv",
+                 sep = ";", header = TRUE)
+
+#sformatowanie daty
+data$data <- ymd(data$data)
+#pozostawienie wy³¹cznie 3 wybranych walut
+data <- data[,c("data","X1GBP", "X1DKK", "X1THB")]
+
+
+w1 <- data %>% ggplot(aes(x = data, y = X1GBP)) + geom_line() +ylab("GBP")
+w2 <- data %>% ggplot(aes(x = data, y = X1DKK)) + geom_line() +ylab("DKK")
+w3 <- data %>% ggplot(aes(x = data, y = X1THB)) + geom_line() +ylab("THB")
+
+grid.arrange(nrow = 3, w1,w2,w3,
+             top = textGrob("Zmiany kursu walut w latach 2012-2018",gp=gpar(fontsize=15,font=2)))
+```
+
+Widzimy, ¿e najs³absza z walut jest rzecz jasna baht tajski, natomiast najmocniejsz¹, najbardziej cenn¹ funt. Najstabilniejsza wydaje siê jednak korona duñska, co potwierdzaj¹ wyliczone poni¿ej wspó³czynniki zmiennoœci (kolejno GBP, DKK i ostatni dla THB) dla naszych walut, gdzie zmiennoœæ waluty duñskiej kszta³towa³a siê na poziomie jedynie 2 %. Co ciekawe waluta brytyjska charakteryzuje siê wiêksz¹ zmiennoœci¹ ni¿ bat, co jednak mniej dziwi, jeœli zwrócimy uwagê jak bardzo s³ab¹, stosunkowo ma³o wartoœciow¹ jest jednostk¹ - 1 bat to równowartoœæ oko³o 10 - 12 groszy, podczas gdy funt wart by³ nawet 6 z³ w 2016 roku, jednak brexit spowodowa³ sukcesywny spadek jej wartoœci i dziœ 1 funt kosztuje oko³o 5 z³.
+
+```{r, echo = FALSE}
+round(sd(data$X1GBP)/mean(data$X1GBP)*100,2)
+round(sd(data$X1DKK)/mean(data$X1DKK)*100,2)
+round(sd(data$X1THB)/mean(data$X1THB)*100,2)
+```
+
+Inne statystyki opisowe kszta³tuj¹ siê nastêpuj¹co :
+
+```{r, echo = FALSE}
+library(purrr)
+library(psych)
+library(kableExtra)
+so <- map(list(data[,2:4]), describeBy)[[1]][c(3:5,8:10)]
+
+so %>% kable() %>% kable_styling()
+```
+
+Widzimy, ¿e zdecydowanie najwiêcej zap³aciæ trzeba za funta, którego mediana kursów wynosi powy¿ej 5 z³, co jest wielokrotnoœci¹ ceny za koronê duñsk¹ (56 groszy) czy bata (10 groszy). Na przestrzeni badanych 6 lat najwiêksza ró¿nica miêdzy cenami funta wynosi niespe³na 1,5 z³, wobec jedynie 7 groszy dla korony i prawie 3 groszy dla bata.
+
+
+Do dalszej czêœci projektu u¿ywa³ bêdê logarytmicznych stóp zwrotu danej waluty. S¹ odporniejsza na wahania, co stanowi ich przewagê nad stopami prostymi. Logarytmiczne stopy zwrotu pisuj¹ procentow¹ zmianê ceny danej waluty w stosunku do dnia poprzedniego. Obliczam je za pomoc¹ poni¿szej funkcji:
+
+```{r}
+# data - wektor cen walut w czasie
+stopy_zw <- function(data){
+  res <- NA
+  for (i in 1:length(data)-1){
+  res[i] <- 100*log(data[i+1]/data[i])
+  #procentowe stopy zwrotu !
+  }
+  return(res)
+}
+```
+
+Jak zaznaczy³em w komentarzu, stopy zwrotu podane bêd¹ w procentach. **Ponadto, wartoœci stóp mno¿ê po wyliczeniu przez -1, tak aby strat mieæ podane w wartoœciach wiêkszych od 0. Poci¹ga to za sob¹ równie¿ koniecznoœæ szukania kwantyli 0.99, a nie 0.01 itd.** Jest to spowodowane faktem, ¿e (przynajmniej mi) dziêki temu ³atwiej patrzy siê na wykresy i intepretuje wyniki. Tak wiêc jeœli w dalszej czêœci projektu odnoszê siê do stóp zwrotów lub strat, to mam na myœli logarytmiczne stopy zwrotu ka¿dej waluty, ale z przeciwnym znakiem.
+
+```{r, echo = FALSE}
+stopyGBP <- -stopy_zw(data$X1GBP)
+stopyDKK <- -stopy_zw(data$X1DKK)
+stopyTHB <- -stopy_zw(data$X1THB)
+
+data <- data[-1,]
+
+data$stopy_GBP <- stopyGBP
+data$stopy_DKK <- stopyDKK
+data$stopy_THB <- stopyTHB
+
+
+w4 <- data %>% ggplot(aes(x = data, y = stopy_GBP)) + geom_line() +ylab("stopa GBP")
+w5 <- data %>% ggplot(aes(x = data, y = stopy_DKK)) + geom_line()+ylab("stopa DKK")
+w6 <- data %>% ggplot(aes(x = data, y = stopy_THB)) + geom_line() +ylab("stopa THB")
+
+grid.arrange(nrow = 3,w4,w5,w6,
+             top = textGrob("Stopy zwrotów danej waluty na przestrzeni lat 2012-2018",gp=gpar(fontsize=15,font=2)))
+```
+
+Poni¿ej statystyki opisowe:
+
+```{r, echo=FALSE}
+
+map(list(data[, c(5:7)]), describeBy)[[1]][c(3:5,8:10)] %>% kable() %>% kable_styling()
+
+```
+
+
+Najwiêksze ró¿nice miêdzy stopami mia³y miejsce jeœli chodzi o funta - rekordowy spadek to 3,67%, przy najwiêkszym wzroœcie wynosz¹cym 3%. Potwierdza siê, ¿e najstabilniejsz¹ walut¹ jest korona duñska, której rozstêp wynosi jedynie 3,48% przy powy¿ej 5,4% rozstêpie waluty tajskiej oraz a¿ 6,72% w przypadku funta brytyjskiego. Najwiêkszy zysk na wartoœci w stosunku do dnia poprzedniego to 3,14% w przypadku bahta tajskiego, a najwiêkszy spadek to 3,67% z dnia 27 czerwca 2016 dla waluty brytyjskiej, co by³o spowodowane wynikami przeprowadzonego 4 dni wczeœniej referendum, w którym obywatele Wielkiej Brytanii opowiedzieli siê na opuszczeniem szeregów Unii Europejskiej przez ich kraj. Niepewnoœæ zwi¹zana z dalszymi losami Wielkiej Brytanii widoczna by³a natychmiastowo na rynku walut, gdzie funt zacz¹³ traciæ na wartoœci. Zawirowania polityczne takiej jak w³aœnie brexit oraz fakt, ¿e spoœród badanych pañstw Wielka Brytania jest 'najgrubsz¹ ryb¹' s¹ powodem du¿ej zmiennoœci w zakresie kursów tej waluty.  
+
+
+## 3. Opis metod i przedstawienie funkcji stworzonych do ich zastosowania
+
+### 3.1 Metoda symulacji historycznej 
+
+**Metoda symulacji historycznej** bezpoœrednio wykorzystuje dane historyczne do wyznaczenia VaR, poprzez wyznaczenie rozk³adu stóp zwrotu i znalezienie odpowiedniego kwantyla. Zak³ada ona, ¿e zmiany, które wyst¹pi¹ w przysz³oœci bêd¹ jednym z scenariuszy, które mia³y ju¿ miejsce w przesz³oœci. Zak³ada równie¿, ¿e prawdopodobieñstwo wyst¹pienia ka¿dego ze scenariuszy jest identyczne. 
+
+Do wyznaczania VaR za jej pomoc¹ wykorzystam poni¿sz¹ funkcjê, gdzie data to wektor zawieraj¹cy stopy zwrotu, q jest kwantylem za pomoc¹ którego wyznaczamy VAR, a d to argument okreœlaj¹cy szerokoœæ okna estymacji. Do stworzonych wektorów VAR i ES bêdê przypisywa³ wartoœci wyliczone dla kolejnych dni za pomoc¹ pêtli, która odpowiada równie¿ za przesuwanie okna estymacji dla kolejnych dni. VAR obliczany bêdzie jako kwantyl z naszego okna estymacji, a Es jako œrednia wartoœæ z obserwacji wiêkszych lub równych naszemu kwantylowi.
+
+**Funkcja:**
+
+```{r}
+#q -> kwantyl, d -> szerokosc okna
+symulacja_hist <- function(data, q = .99, d = 500){
+  var <- NA
+  ES <- NA
+  for (i in 1:(length(data)-d)){
+    okno <- data[i:(i+500-1)] 
+    var[i] <- quantile(okno, q)
+    ES[i] <- mean(okno[okno >= quantile(okno, q)])
+  }
+  return(list(var = var,ES = ES))
+}
+```
+
+Funkcja zwraca listê 2 elementow¹, której 1 element to wektor VAR, a drugi to rzecz jasna ES. Wywo³anie funkcji oraz struktura zwracanego przez funkcjê obiektu przedstawia siê tak jak poni¿ej. Analogicznie bêdzie wygl¹da³o to w przypadku pozosta³ych metod, dlatego nie bêdzie ju¿ póŸniej pokazywane.
+
+```{r}
+var_sh_GBP <- symulacja_hist(data$stopy_GBP)
+var_sh_DKK <- symulacja_hist(data$stopy_DKK)
+var_sh_THB <- symulacja_hist(data$stopy_THB)
+
+#struktura zwracanego przez funkcjê obiektu.
+str(var_sh_DKK)
+```
+
+### 3.2 Metoda bootstrapowa
+
+**Bootstrap** to metoda polegaj¹ca na wykorzystaniu losowania ze zwracaniem, by stworzyæ wiele alternatywnych historii, na podstawie przesz³oœci. Szczególnie sensowne wydaje siê jej zastosowanie, gdy dysponujemy ma³¹ iloœci¹ danych. VAR wyznaczany jest jako œrednia z uzyskanych wartoœci VAR dla wylosowanych scenariuszy. Jej dodatkowym plusem jest fakt, ¿e jej specyfika pozwala na okreœlenie przedzia³ów ufnoœci dla VAR. W przypadku tej metody, sama procedura liczenia VaR dla poszczególnych okien estymacji jest taka sama jak w przypadku metody historycznej. Jednak dziêki wielokrotnemu liczeniu VAR dla danego dnia (przy losowaniu ró¿nych historii dla okien estymacji) metoda ta daje nadziejê na nieco dok³adniejsze oszacowanie liczonych przez nas wartoœci.
+
+**Funkcja:**
+
+```{r}
+#n - liczba symulacji, n - liczba obserwacji w losowanej probce
+bootstrap_var <- function(data, q = .99, d = 500, x = 600, n = 1000){
+  var <- NULL
+  ES <- NULL
+  
+  for (i in 1:(length(data)-d)){
+    okno <- data[i:(i+500-1)] 
+    var_b <- NA
+    ES_b <- NA
+    
+    for (i in 1:n){
+    #losowanie indeksów [ze zwracaniem]
+    set.seed(i)
+    index <- sample(x = c(1:d), size = x, replace = TRUE)
+    boot_sample <- okno[index]
+    var_b[i] <- quantile(boot_sample, q)
+    ES_b[i] <- mean(boot_sample[boot_sample >= var_b[i]])
+    }
+
+    var <- c(var, mean(var_b))
+    ES <- c(ES, mean(ES_b))
+    
+  }
+  return(list(var = var,ES = ES))
+}
+
+```
+
+Za pomoc¹ 2 pêtli tworzê procedurê bootstrapu: 2ga pêtla odpowiada za tworzenie 'n' zbiorów historycznych, dla ka¿dego dnia, w którym wyznaczamy VAR. Dla ka¿dego z wylosowanych zbiorów wyznaczamy VAR i ES tak jak w metodzie historycznej. Po wyznaczeniu 'n' (czyli 1000) wartoœci wyliczamy œredni¹ z otrzymanych wyników i rozpoczynamy procedur¹ dla kolejnego okna estymacji. Z racji tego, ¿e losujemy ze zwracaniem, to liczba obserwacji w wylosowanych zbiorach mo¿e byæ wiêksza od liczby dni w naszym podstawowym oknie estymacji, dlatego domyœlnie ustawi³em j¹ jako 600 - argument x. Argument n odpowiada za liczbê alternatywnych zbiorów losowanych przy wyznaczaniu VaR na dany dzieñ.
+
+```{r, echo = FALSE}
+var_b_GBP <- bootstrap_var(data = data$stopy_GBP)
+var_b_DKK <- bootstrap_var(data = data$stopy_DKK)
+var_b_THB <- bootstrap_var(data = data$stopy_THB)
+```
+
+### 3.3 Metoda symulacji historycznej z wagami
+
+**Metoda symulacji historycznej z wagami** to sposób wyznaczania VaR bêd¹cy swojego rodzaju rozszerzeniem, udoskonaleniem metody symulacji historycznej. Uwzglêdnia fakt, ¿e obserwacje, które mia³y miejsce niedawno, w lepszym stopniu opisuj¹ zmiennoœæ obecn¹ zmiennoœæ oraz sytuacje rynkow¹. Tzw. 'wagi' s¹ wyznaczane jako kolejne wyrazy ci¹gu geometrycznego o `q` bliskim 1. W moim badaniu `q` bêdzie równe 0.995, dziêki czemu im starsza obserwacja tym mniejsza bêdzie jej waga, lecz przy tym te najstarsze obserwacje nie bêd¹ zupe³nie niewa¿ne. Wzór na wagê 'i-tej' obserwacji przedstawia siê nastêpuj¹co:
+
+$$
+waga(i) = \frac{q^{n-i}*(1-q)}{1 - q^n}
+$$
+
+gdzie jako 'n' oznaczono szerokoœæ okna estymacji.
+
+**Funkcja:**
+
+```{r}
+symulacja_hist_z_wagami <- function(data, q = .99, d = 500, g = .995){
+  
+  wagi <- sapply(c(1:d), function(x){(g^(d-x)*(1-g))/(1-g^d)})
+  ES <- NA
+  var <- NA
+  
+  for (i in (1:(length(data)-d))){
+    okno <- data[i:(i+d-1)]
+    rozklad <- DiscreteDistribution(supp = okno, prob = wagi)
+    var[i] <- rozklad@q(q)
+    index <- which(okno > var[i])
+    ES[i] <- sum(okno[index]*(wagi[index])/(1-q)) +
+     okno[which(okno == var[i])]*(1 - sum(wagi[index])/(1-q))
+  }
+  return(list(var = var,ES = ES))
+}
+```
+
+Najpierw utworzony zostaje wektor wag, zgodnie z wzorem podanym powy¿ej funkcji. Nastêpnie za pomoc¹ funkcji `DiscreteDistibution` tworzony jest rozk³ad z odpowiednimi wagami dla poszczególnych obserwacji. Nastêpnie wyznaczany jest VAR (analogicznie jak w poprzednich metodach) oraz ES - który wyznaczany jest jako suma iloczynów obserwacji przekraczaj¹cych wartoœæ VAR w obecnym oknie estymacji i odpowiadaj¹cym im warunkowych prawdopodobieñstw ich wyst¹pienia w wypadku gdy VAR jest przekroczony.
+
+```{r, echo =  FALSE}
+var_h_GBP <- symulacja_hist_z_wagami(data$stopy_GBP)
+var_h_DKK <- symulacja_hist_z_wagami(data$stopy_DKK)
+var_h_THB <- symulacja_hist_z_wagami(data$stopy_THB)
+```
+
+
+## 4. Przedstawienie wyników 
+
+Wyniki poszczególnych algorytmów przedstawione zostan¹ na wykresach. Dla ka¿dej metody przedstawione zostan¹ wykresy, na których pokazane bêd¹ wyznaczone wartoœci VAR i ES, na tle strat (czyli stóp zwrotu pomno¿onych przez -1). 
+
+### 4.1 Dla metody historycznej
+
+```{r, echo = FALSE}
+data1 <- data[-c(1:500),] %>% bind_cols(VAR_hist_GBP = var_sh_GBP[[1]], VAR_hist_DKK = var_sh_DKK[[1]],
+                                        VAR_hist_THB = var_sh_THB[[1]], 
+                                        VAR_hull_GBP = var_h_GBP[[1]], VAR_hull_DKK = var_h_DKK[[1]],
+                                        VAR_hull_THB = var_h_THB[[1]],
+                                        VAR_boot_GBP = var_b_GBP[[1]], VAR_boot_DKK = var_b_DKK[[1]],
+                                        VAR_boot_THB = var_b_THB[[1]],
+                                        ES_hist_GBP = var_sh_GBP[[2]], ES_hist_DKK = var_sh_DKK[[2]],
+                                        ES_hist_THB = var_sh_THB[[2]], 
+                                        ES_hull_GBP = var_h_GBP[[2]], ES_hull_DKK = var_h_DKK[[2]],
+                                        ES_hull_THB = var_h_THB[[2]],
+                                        ES_boot_GBP = var_b_GBP[[2]], ES_boot_DKK = var_b_DKK[[2]],
+                                        ES_boot_THB = var_b_THB[[2]])
+```
+
+```{r,echo=FALSE}
+#GBP
+data1 %>% ggplot(aes(x = data, y = VAR_hist_GBP,colour = "VAR")) + geom_line(size = 1.1) +
+  geom_line(aes(y = data1$ES_hist_GBP, colour = "ES"),size = 1.1) +
+  geom_point(aes(y = data1$stopy_GBP), col = "black", size = 2.5) + 
+  ylim(0.5,3) + scale_colour_manual("", 
+                                    breaks = c("VAR", "ES"),
+                                    values = c("blue", "orange")) +
+  labs(title = "Wynik symulacji historycznej", subtitle = "dla funta brytyjskiego") +
+  ylab("stopy zwrotu") 
+
+#DKK
+data1 %>% ggplot(aes(x = data, y = VAR_hist_DKK,colour = "VAR")) + geom_line(size = 1.1) +
+  geom_line(aes(y = data1$ES_hist_DKK, colour = "ES"),size = 1.1) +
+  geom_point(aes(y = data1$stopy_DKK), col = "black", size = 2.5) + 
+  ylim(0.24,1.8) + scale_colour_manual("", 
+                                    breaks = c("VAR", "ES"),
+                                    values = c("blue", "orange")) +
+  labs(title = "Wynik symulacji historycznej", subtitle = "dla korony duñskiej") +
+  ylab("stopy zwrotu")
+
+#THB
+data1 %>% ggplot(aes(x = data, y = VAR_hist_THB,colour = "VAR")) + geom_line(size = 1.1) +
+  geom_line(aes(y = data1$ES_hist_THB, colour = "ES"),size = 1.1) +
+  geom_point(aes(y = data1$stopy_THB), col = "black", size = 2.5) + 
+  ylim(0.74,2.58) + scale_colour_manual("", 
+                                        breaks = c("VAR", "ES"),
+                                        values = c("blue", "orange")) +
+  labs(title = "Wynik symulacji historycznej", subtitle = "dla bahta tajskiego") +
+  ylab("stopy zwrotu") 
+
+```
+
+### 4.2 Dla metody bootstrapu
+
+```{r,echo=FALSE}
+data1 %>% ggplot(aes(x = data, y = VAR_boot_GBP,colour = "VAR")) + geom_line(size = 1) +
+  geom_line(aes(y = data1$ES_boot_GBP, colour = "ES"), size = 1) +
+  geom_point(aes(y = data1$stopy_GBP), col = "black", size = 2.5) + 
+  ylim(0.75,3.25) + scale_colour_manual("", 
+                                        breaks = c("VAR", "ES"),
+                                        values = c("blue", "orange")) +
+  labs(title = "Wynik metody bootstrapowej", subtitle = "dla funta brytyjskiego") +
+  ylab("stopy zwrotu") 
+
+#DKK
+data1 %>% ggplot(aes(x = data, y = VAR_boot_DKK,colour = "VAR")) + geom_line(size = 1) +
+  geom_line(aes(y = data1$ES_boot_DKK, colour = "ES"), size = 1) +
+  geom_point(aes(y = data1$stopy_DKK), col = "black", size = 2.5) + 
+  ylim(0.24,1.8) + scale_colour_manual("", 
+                                        breaks = c("VAR", "ES"),
+                                        values = c("blue", "orange")) +
+  labs(title = "Wynik metody bootstrapowej", subtitle = "dla korony duñskiej") +
+  ylab("stopy zwrotu") 
+
+
+#THB
+data1 %>% ggplot(aes(x = data, y = VAR_boot_THB,colour = "VAR")) + geom_line(size = 1) +
+  geom_line(aes(y = data1$ES_boot_THB, colour = "ES"), size = 1) +
+  geom_point(aes(y = data1$stopy_THB), col = "black", size = 2.5) + 
+  ylim(0.74,2.18) + scale_colour_manual("", 
+                                        breaks = c("VAR", "ES"),
+                                        values = c("blue", "orange")) +
+  labs(title = "Wynik metody bootstrapowej", subtitle = "dla bahta tajskiego") +
+  ylab("stopy zwrotu") 
+```
+
+### 4.3 Dla metody symulacji historycznej z wagami
+```{r,echo=FALSE}
+data1 %>% ggplot(aes(x = data, y = VAR_hull_GBP,colour = "VAR")) + geom_line(size = 1.1) +
+  geom_line(aes(y = data1$ES_hull_GBP, colour = "ES"),size = 1.1) +
+  geom_point(aes(y = data1$stopy_GBP), col = "black", size = 2.5) + 
+  ylim(0.75,3.25) + scale_colour_manual("", 
+                                    breaks = c("VAR", "ES"),
+                                    values = c("blue", "orange")) +
+  labs(title = "Wynik symulacji historycznej z wagami", subtitle = "dla funta brytyjskiego") +
+  ylab("stopy zwrotu") 
+
+#DKK
+data1 %>% ggplot(aes(x = data, y = VAR_hull_DKK,colour = "VAR")) + geom_line(size = 1.1) +
+  geom_line(aes(y = data1$ES_hull_DKK, colour = "ES"),size = 1.1) +
+  geom_point(aes(y = data1$stopy_DKK), col = "black", size = 2.5) + 
+  ylim(0.24,1.8) + scale_colour_manual("", 
+                                        breaks = c("VAR", "ES"),
+                                        values = c("blue", "orange")) +
+  labs(title = "Wynik symulacji historycznej z wagami", subtitle = "dla korony duñskiej") +
+  ylab("stopy zwrotu")
+
+#THB
+data1 %>% ggplot(aes(x = data, y = VAR_hull_THB,colour = "VAR")) + geom_line(size = 1.1) +
+  geom_line(aes(y = data1$ES_hull_THB, colour = "ES"),size = 1.1) +
+  geom_point(aes(y = data1$stopy_THB), col = "black", size = 2.5) + 
+  ylim(0.74,2.18) + scale_colour_manual("", 
+                                        breaks = c("VAR", "ES"),
+                                        values = c("blue", "orange")) +
+  labs(title = "Wynik symulacji historycznej z wagami", subtitle = "dla bahta tajskiego") +
+  ylab("stopy zwrotu")
+```
+
+
+### 4.4 Wizualne porównanie metod
+
+```{r, echo = FALSE}
+#GBP
+data1 %>%
+  ggplot(aes(y = VAR_hist_GBP, x = data,colour = "metoda historyczna")) + geom_line(size = 1.1) +
+  geom_point(data = data1, aes(y = stopy_GBP), size = 2.5, col = "black") +
+  geom_line(data = data1, aes(y = VAR_hull_GBP, colour = "metoda wg hulla"), size = 1.0) +
+  geom_line(data = data1, aes(y = VAR_boot_GBP, colour = "bootstrap"), size = 1.0) + ylim(0.5,2.75) +
+  labs(title = "Wyniki dla funta brytyjskiego") +
+  ylab("stopy zwrotu") + scale_colour_manual("", 
+                                             breaks = c("metoda historyczna", "bootstrap", "metoda wg hulla"),
+                                             values = c("blue", "red", "orange"))
+```
+
+```{r, echo = FALSE}
+#DKK
+data1 %>%
+  ggplot(aes(y = VAR_hist_DKK, x = data,colour = "metoda historyczna")) + geom_line(size = 1.1) +
+  geom_point(data = data1, aes(y = stopy_DKK), size = 2.5, col = "black") +
+  geom_line(data = data1, aes(y = VAR_hull_DKK, colour = "metoda wg hulla"), size = 1.0) +
+  geom_line(data = data1, aes(y = VAR_boot_DKK, colour = "bootstrap"), size = 1.0) + ylim(0.24,1.8) +
+  labs(title = "Wyniki dla korony duñskiej") +
+  ylab("stopy zwrotu") + scale_colour_manual("", 
+                                             breaks = c("metoda historyczna", "bootstrap", "metoda wg hulla"),
+                                             values = c("blue", "red", "orange"))
+```
+
+```{r, echo = FALSE}
+#THB
+data1 %>%
+  ggplot(aes(y = VAR_hist_THB, x = data,colour = "metoda historyczna")) + geom_line(size = 1.1) +
+  geom_point(data = data1, aes(y = stopy_THB), size = 2.5, col = "black") +
+  geom_line(data = data1, aes(y = VAR_hull_THB, colour = "metoda wg hulla"), size = 1.0) +
+  geom_line(data = data1, aes(y = VAR_boot_THB, colour = "bootstrap"), size = 1.0) + ylim(0.74,2.18) +
+  labs(title = "Wyniki dla bahta tajskiego") +
+  ylab("stopy zwrotu") + scale_colour_manual("", 
+                                             breaks = c("metoda historyczna", "bootstrap", "metoda wg hulla"),
+                                             values = c("blue", "red", "orange"))
+
+```
+
+
+### 4.5 Komentarz do wykresów
+
+Na pierwszy rzut oka widaæ podobne wyniki w przypadku metod symulacji historycznej i bootstrapu - co nie mo¿e dziwiæ ze wzglêdu na podobieñstwa miêdzy tymi metodami. Inaczej sytuacja ma siê z metod¹ historyczn¹ z wagami. Widzimy klarowny wp³yw wprowadzonych wag na wartoœci VaR. S¹ one coraz mniejsze wraz ze spadkiem wag dla obserwacji przekraczaj¹cych kwantyl. Gdy do okna 'do³¹czy' œwie¿a (nowa) obserwacja, która przekracza kwantyl, VaR skacze blisko jej wartoœci - co spowodowane jest jej du¿¹ w danym oknie estymacji. Zastanawiaæ mo¿e jedynie fakt(w przypadku walut brytyjskiej i tajskiej), dlaczego podczas tych skoków var znajduje siê a¿ tak blisko wystêpuj¹cej wtedy wartoœci straty. Dziwi równie¿, ¿e dla korony duñskiej wykres jest bardziej intuicyjny (brak jest takich wyraŸnych skoków tu¿ pod wartoœæ straty jak w przypadku pozosta³ych walut).
+
+## 5 Testy
+
+W celu sprawdzenia, który z testów osi¹gn¹³ najlepsze wyniki przeprowadzone zostan¹ testy:
+
+* Kupca,
+
+* Christoffersen'a,
+
+* oraz test wartoœci rzeczywistych.
+
+Pierwszy z wymienionych testów, test Kupca weryfikuje czy udzia³ przekroczeñ w oknach estymacji jest zgodny z zadanym poziomem istotnoœci. Sprawdza ile razy zosta³ przekroczony VAR w oknie na podstawie którego zosta³ wyznaczony. Na podstawie specjalnej statystyki wyznacza siê minimaln¹ i maksymaln¹ liczbê przekroczeñ dla danych parametrów (szerokoœci okna, poziomu istotnoœci). Przyk³adowo, dla tego badania, (przy 99% VAR i 500 elementowym oknie estymacji) VAR wyznaczony jest poprawnie jeœli w oknie na podstawie którego by³ estymowany zosta³ przekroczony 1,2,..,8,9 lub 10 razy. H0 testu - VaR wyznaczony jest poprawnie.
+
+Test Christoffersen'a sprawdza natomiast czy przekroczenia jakie mia³y miejsce wystêpuj¹ niezale¿nie w czasie. Nag³e wyst¹pienie kilku wyj¹tków w krótkim czasie mo¿e oznaczaæ powa¿ne problemy dla danej instytucji finansowej ze wzglêdu na mo¿liwe du¿e straty poniesione w krótkim okresie, wiêc rzecz jasna zale¿y im na tym, aby te przekroczenia by³y niezale¿ne. H0 testu - przekroczenia VaR s¹ niezale¿ne w czasie. 
+
+Ostatni z testów, jak sama nazwa wskazuje, sprawdza jak wyznaczony var sprawdzi³ siê w praktyce. Porównujemy wyznaczone wartoœci var do strat, które mia³y miejsce w rzeczywistoœci i zliczamy, ile razy var zosta³ przekroczony. Dzielimy sumê przekroczeñ przez liczbê dni dla których dokonaliœmy sprawdzenia VaR i otrzymujemy procentowy udzia³ dni, w których zosta³ przekroczony var. Im bli¿sza jest to wartoœæ do poziomu istotnoœci który przyjêliœmy, tym lepiej.
+
+
+
+### 5.1 Wykorzystane testy i ich implementacja
+
+**TEST KUPCA**
+
+```{r}
+test_kupca <- function(straty, var, d = 500){
+  res <- NA
+  suma_wyj <- NA
+  for (i in (1:length(var)))
+  {
+    okno <- straty[i:(d+i-1)]
+    #liczam wyst¹pienie wyj¹tków
+    temp <- ifelse(okno > var[i], 1 , 0)
+    suma_wyj[i] <- sum(temp)
+    #sprawdzam czy mieszcz¹ siê w odpowiednim przedziale 
+    #jeœli tak to var wyznaczony jest poprawnie - 1
+    if (suma_wyj[i] < 11 && suma_wyj[i] > 0)
+    {
+      res[i] <- 1
+    } else {res[i] <- 0}
+  }
+  acc <- sum(res)/length(var)
+  return(round(acc*100,2))
+}
+```
+
+**TEST CHRISTOFFERSENA**
+```{r}
+#d jest szerokoœci¹ okna na podstawie którego wyznaczany jest var
+christoffersen_test <- function(straty, var, d = 500){
+  res <- NULL
+  for (i in 1:length(var)){
+    a00 <- 0
+    a01 <- 0
+    a10 <- 0
+    a11 <- 0
+    
+    #deklarowanie okna na podstawie ktorego liczony byl dany var
+    okno <- straty[i:(d-1+i)]
+    wyj <- ifelse(okno > var[i], 1, 0)
+    
+    for(n in 1:(d-1)){
+      #zliczanie zdarzen potrzebnych do nastepnego etapu
+      if(wyj[n] == 0 && wyj[n+1]==0){
+        a00 = a00+1
+      } else if(wyj[n] == 1 && wyj[n+1]==0){
+        a10 = a10+1
+      } else if(wyj[n] == 0 && wyj[n+1]==1){
+        a01 = a01+1
+      } else {
+        a11 = a11+1
+      }
+    }
+    #obliczanie niezbêdnych do przeprowadzenia testu statystyk
+    q0 <- a00 / (a00 + a01)
+    q1 <- a10 / (a10 + a11)
+    qq <- (a00 + a10) / (a00 + a10 + a01 + a11)
+    l_ratio <- -2*log((qq/q0)^a00*((1-qq)/(1-q0))^a01*(qq/q1)^a10*((1-qq)/(1-q1))^a11)
+    
+    if ( l_ratio > 6.635 ){   
+      # 0 jesli odrzucamy h0, 1 jeœli przyjmujemy
+      res[i] <- 0
+    } else {res[i] <- 1}
+  }
+  #acc okreœla jaki jest odsetek poprawnie wyznaczonych VAR
+  acc <- sum(res)/length(res)
+  return(round(acc*100,2))
+}
+```
+
+**TEST WARTOŒCI RZECZYWISTYCH**
+```{r}
+twr <- function(var, straty) {
+  #zlicza wyjatki
+  suma_wyj <- ifelse(var < straty, 1, 0)
+  
+  res <- sum(suma_wyj)/length(var)
+  
+  return(round(res*100,2))
+}
+```
+
+### 5.2 Wyniki testów
+
+
+Ze wzglêdu na specyfikê metody symulacji historycznej, nie ma rzecz jasna sensu przeprowadzania dla niej testu kupca. W przypadku metody bootstrap istnieje niewielka, w praktyce niemal równa 0 szansa, ¿e wynik dla tej metody bêdzie wskazywa³ na jakiekolwiek b³êdy. Musia³oby dojœæ do szeregu bardzo pechowych losowañ, aby to dosz³o do skutku, co przy liczbie symulacji stosowanych w praktyce jest niemo¿liwe.
+
+Wyniki podane w tabeli oznaczaja:
+
+* w przypadku testów Kupca i Christoffersen'a - odsetek VARów wyznaczonych poprawnie w œwietle wymagañ danego testu,
+
+* procent dni w jakie VAR zosta³ przekroczony przez wartoœæ straty wystêpuj¹ca w danym dniu - w przypadku testu wartoœci rzeczywistych.
+
+```{r, echo=FALSE}
+r_GBP_hist <- twr(straty = stopyGBP[-c(1:500)], var = data1$VAR_hist_GBP)
+r_GBP_hull <- twr(straty = stopyGBP[-c(1:500)], var = data1$VAR_hull_GBP)
+r_GBP_boot <- twr(straty = stopyGBP[-c(1:500)], var = data1$VAR_boot_GBP)
+
+r_DKK_hist <- twr(straty = stopyDKK[-c(1:500)], var = data1$VAR_hist_DKK)
+r_DKK_hull <- twr(straty = stopyDKK[-c(1:500)], var = data1$VAR_hull_DKK)
+r_DKK_boot <- twr(straty = stopyDKK[-c(1:500)], var = data1$VAR_boot_DKK)
+
+r_THB_hist <- twr(straty = stopyTHB[-c(1:500)], var = data1$VAR_hist_THB)
+r_THB_hull <- twr(straty = stopyTHB[-c(1:500)], var = data1$VAR_hull_THB)
+r_THB_boot <- twr(straty = stopyTHB[-c(1:500)], var = data1$VAR_boot_THB)
+
+k_GBP_hull <- test_kupca(straty = stopyGBP, var = data1$VAR_hull_GBP)
+k_GBP_boot <- test_kupca(straty = stopyGBP, var = data1$VAR_boot_GBP)
+
+k_DKK_hull <- test_kupca(straty = stopyDKK, var = data1$VAR_hull_DKK)
+k_DKK_boot <- test_kupca(straty = stopyDKK, var = data1$VAR_boot_DKK)
+
+k_THB_hull <- test_kupca(straty = stopyTHB, var = data1$VAR_hull_THB)
+k_THB_boot <- test_kupca(straty = stopyTHB, var = data1$VAR_boot_THB)
+
+chr_GBP_hist <- christoffersen_test(straty = stopyGBP, var = data1$VAR_hist_GBP)
+chr_GBP_hull <- christoffersen_test(straty = stopyGBP, var = data1$VAR_hull_GBP)
+chr_GBP_boot <- christoffersen_test(straty = stopyGBP, var = data1$VAR_boot_GBP)
+
+chr_DKK_hist <- christoffersen_test(straty = stopyDKK, var = data1$VAR_hist_DKK)
+chr_DKK_hull <- christoffersen_test(straty = stopyDKK, var = data1$VAR_hull_DKK)
+chr_DKK_boot <- christoffersen_test(straty = stopyDKK, var = data1$VAR_boot_DKK)
+
+chr_THB_hist <- christoffersen_test(straty = stopyTHB, var = data1$VAR_hist_THB)
+chr_THB_hull <- christoffersen_test(straty = stopyTHB, var = data1$VAR_hull_THB)
+chr_THB_boot <- christoffersen_test(straty = stopyTHB, var = data1$VAR_boot_THB)
+
+
+resultsGBP <- data.frame("Test kupca" = 0, "Test christoffersena" = 0, "Test wartoœci rzeczywistych" = 0)
+resultsDKK <- data.frame("Test kupca" = 0, "Test christoffersena" = 0, "Test wartoœci rzeczywistych" = 0)
+resultsTHB <- data.frame("Test kupca" = 0, "Test christoffersena" = 0, "Test wartoœci rzeczywistych" = 0)
+```
+
+
+**Dla funta brytyjskiego:**<br/>
+
+```{r, echo = FALSE}
+#GBP
+resultsGBP <- rbind(resultsGBP, c(NA, chr_GBP_hist, r_GBP_hist), c(k_GBP_boot, chr_GBP_boot, r_GBP_boot),
+                    c(k_GBP_hull, chr_GBP_hull, r_GBP_hull))
+resultsGBP <- resultsGBP[-1,]
+rownames(resultsGBP) <- c("metoda historczyna", "metoda bootstrap", "metoda hulla")
+
+resultsGBP %>% kable() %>% kable_styling()
+```
+
+
+**Dla korony duñskiej:** <br/>
+```{r, echo = FALSE}
+#DKK
+resultsDKK <- rbind(resultsDKK, c(NA, chr_DKK_hist, r_DKK_hist), c(k_DKK_boot, chr_DKK_boot, r_DKK_boot),
+                    c(k_DKK_hull, chr_DKK_hull, r_DKK_hull))
+resultsDKK <- resultsDKK[-1,]
+rownames(resultsDKK) <- c("metoda historczyna", "metoda bootstrap", "metoda hulla")
+
+resultsDKK %>% kable() %>% kable_styling()
+```
+
+
+**Dla bahta tajskiego:** <br/>
+```{r, echo = FALSE}
+#THB
+resultsTHB <- rbind(resultsTHB, c(NA, chr_THB_hist, r_THB_hist), c(k_THB_boot, chr_THB_boot, r_THB_boot),
+                    c(k_THB_hull, chr_THB_hull, r_THB_hull))
+resultsTHB <- resultsTHB[-1,]
+rownames(resultsTHB) <- c("metoda historczyna", "metoda bootstrap", "metoda hulla")
+
+resultsTHB %>% kable() %>% kable_styling()
+```
+
+Widzimy, ¿e wyniki wszystkich testów s¹ bardzo podobne. W przypadku testu kupca dla bootstrapu moje przypuszczenia okaza³y siê zgodne z rzeczywistoœci¹ - 100% poprawnoœæ wyznaczonych VAR. Zgodnie z wynikami testu Christoffersena widzimy równie¿, ¿e wy³¹cznie metoda symulacji historycznej z wagami w przypadku funta w 13% wyznaczonych VARow nie spe³ni³a odpowiednich wymagañ i nie zosta³a zaklasyfikowana jako poprawna pod wzglêdem niezale¿noœci wyj¹tków w czasie. Test wartoœci rzeczywistych w przypadku walut GBP i DKK wskazuje na te same wyniki, natomiast dla bata najlepsza wydaje siê metoda hulla, a co ciekawe bootstrap okaza³ siê gorszy od metody historycznej. 
+
+
+## 6. Podsumowanie
+
+**Wnioski z badania:**
+
+* na podstawie testów ciê¿ko stwierdziæ, która z metod daje najlepszy wynik,
+
+* metoda symulacji historycznej z wagami patrz¹c pod k¹tem wyników christoffersena jako jedyna z wykorzystanych metoda nie ma 100% poprawnoœci w przypadku ka¿dej z walut,
+
+* jednak ju¿ na podstawie testu wartoœci rzeczywistych wydaje siê byæ najlepsz¹ z zastosowanych w tym badaniu metod,
+
+* metody symulacji historycznej i bootstrapu uzyskuj¹ bardzo zbli¿one wyniki, a co ciekawe ciut lepsza okaza³a siê ta prostsz¹ z metod. Zasadne wydaje siê w takim razie pytanie, czy skoro daj¹ podobne wyniki to jest sens stosowaæ metod¹ zdecydowanie bardziej z³o¿on¹ obliczeniowo w praktyce ?
+
+* bior¹c jednak pod uwagê wykresy jakie przedstawione by³y w trakcie badania, to w³aœnie metoda bootstrapu moim zdaniem wygl¹da najbardziej sensownie,
+
+* **co z tego wynika ? Tylko i a¿ tyle, ¿e ciê¿ko jednoznacznie wybraæ, która z metod okaza³a siê najlepsza. Ka¿da ma swoje wady i zalety, na podstawie których ciê¿ko zdecydowanie wyró¿niæ 1 najlepsz¹.**
